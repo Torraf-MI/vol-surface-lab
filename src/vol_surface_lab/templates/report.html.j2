@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Superficie di volatilità – {{ nome }}</title>
+{% if plotly_inline %}<script>{{ plotly_inline | safe }}</script>{% else %}<script src="{{ plotly_cdn }}"></script>{% endif %}
+<style>
+  :root { --blu: #1f4e79; --grigio: #595959; --chiaro: #f2f5f9; }
+  body { font-family: "Segoe UI", Helvetica, Arial, sans-serif; color: #222; max-width: 1040px;
+         margin: 0 auto; padding: 32px 16px 60px; line-height: 1.5; background: #fff; }
+  header { border-bottom: 3px solid var(--blu); padding-bottom: 12px; margin-bottom: 24px; }
+  h1 { color: var(--blu); margin: 0 0 4px; font-size: 1.7rem; }
+  h2 { color: var(--blu); font-size: 1.2rem; margin-top: 38px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+  h3 { font-size: 1rem; margin: 22px 0 6px; }
+  .sub { color: var(--grigio); font-size: .92rem; }
+  .kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 12px; margin: 16px 0; }
+  .kpi div { background: var(--chiaro); border-radius: 8px; padding: 12px 14px; }
+  .kpi b { display: block; font-size: 1.25rem; color: var(--blu); }
+  .kpi span { font-size: .78rem; color: var(--grigio); text-transform: uppercase; letter-spacing: .03em; }
+  .kpi small { display: block; font-size: .8rem; color: var(--grigio); }
+  .esito { border-left: 5px solid #fab219; background: #fff8e8; padding: 12px 16px; border-radius: 4px; margin: 16px 0; }
+  .azione { border-left: 5px solid #1baf7a; background: #effaf5; padding: 12px 16px; border-radius: 4px; margin: 16px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: .86rem; margin: 10px 0; }
+  th, td { padding: 6px 9px; text-align: right; border-bottom: 1px solid #e5e5e5; vertical-align: top; }
+  th:first-child, td:first-child { text-align: left; }
+  td.testo, th.testo { text-align: left; }
+  th { background: var(--blu); color: #fff; font-weight: 600; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .scroll { overflow-x: auto; }
+  .scroll table { white-space: nowrap; }
+  .grafico { margin: 14px 0; overflow: hidden; }
+  .note { font-size: .8rem; color: var(--grigio); background: var(--chiaro); padding: 12px 14px; border-radius: 6px; }
+  code { background: var(--chiaro); padding: 1px 4px; border-radius: 3px; font-size: .85rem; }
+  @media print { .grafico { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Superficie di volatilità implicita e rischio di modello</h1>
+  <div class="sub"><b>{{ nome }}</b>, spot {{ spot }} · {{ n_scadenze }} scadenze da un mese a due anni · report del {{ oggi }}</div>
+</header>
+{% if data_note %}<p class="note">{{ data_note }}</p>{% endif %}
+
+<h2>Sintesi</h2>
+<div class="kpi">
+  {% for label, value, n in kpi %}<div><span>{{ label }}</span><b>{{ value }}</b><small>{{ n }}</small></div>{% endfor %}
+</div>
+<div class="azione">Il report parte da una catena di opzioni grezza ({{ n_quot }} quotazioni di call e put) e arriva al
+prezzo di prodotti esotici sotto quattro modelli. In mezzo: forward e sconto dalla parità put-call, pulizia dei dati,
+smile per scadenza con SVI, superficie senza arbitraggio con SSVI, calibrazione di Heston e volatilità locale di
+Dupire. Il messaggio finale è il <b>rischio di modello</b>: modelli che prezzano allo stesso modo le opzioni europee
+danno prezzi diversi agli esotici che stanno dentro i certificati.</div>
+
+<h2>1. I dati: forward, sconto e pulizia</h2>
+<p>Il forward e il fattore di sconto di ogni scadenza non si ipotizzano: si leggono nei prezzi con la parità put-call,
+<code>C − P = D·(F − K)</code>, con una regressione robusta sugli strike vicini allo spot. Il tasso e il «carry»
+(tasso meno dividendi) impliciti sono quelli che il mercato usa davvero.</p>
+<table>
+  <tr><th>Scadenza</th><th>Forward</th><th>Fattore di sconto</th><th>Tasso implicito</th><th>Carry implicito</th><th>Coppie usate</th></tr>
+  {% for r in forward %}<tr><td>{{ r.T }}</td><td>{{ r.F }}</td><td>{{ r.D }}</td><td>{{ r.r }}</td><td>{{ r.carry }}</td><td>{{ r.punti }}</td></tr>{% endfor %}
+</table>
+<p>Per ogni strike si tiene l'opzione fuori dal denaro (put sotto il forward, call sopra), che è la più liquida. Su
+{{ n_otm }} quotazioni ne restano {{ n_valide }}. La pulizia procede per gradi: prima gli errori evidenti (bid nullo,
+bid sopra l'ask, spread troppo largo, prezzo fuori dai limiti di arbitraggio), poi la <b>convessità</b> del prezzo
+rispetto allo strike (un butterfly non può costare meno di zero, oltre lo spread) e infine lo <b>smile</b>: si stima
+una SVI e si toglie, un punto alla volta, la quotazione più lontana oltre due mezzi spread.</p>
+<table>
+  <tr><th>Motivo dello scarto</th><th>Quotazioni</th></tr>
+  {% for s in scarti %}<tr><td>{{ s.motivo }}</td><td>{{ s.n }}</td></tr>{% endfor %}
+</table>
+<div class="grafico">{{ grafici.pulizia | safe }}</div>
+
+<h2>2. Lo smile per scadenza: SVI</h2>
+<p>La SVI di Gatheral descrive la varianza totale <code>w(k) = σ²T</code> come funzione della log-moneyness
+<code>k = ln(K/F)</code> con cinque parametri: livello (a), inclinazione delle ali (b), asimmetria (ρ), posizione (m)
+e curvatura al vertice (σ). Ogni scadenza ha la sua SVI, pesata con l'inverso dello spread.</p>
+<div class="scroll"><table>
+  <tr><th>Scadenza</th><th>a</th><th>b</th><th>ρ</th><th>m</th><th>σ</th><th>Errore medio (punti di vol)</th><th>min g(k)</th></tr>
+  {% for s in svi %}<tr><td>{{ s.T }}</td><td>{{ s.a }}</td><td>{{ s.b }}</td><td>{{ s.rho }}</td><td>{{ s.m }}</td><td>{{ s.sigma }}</td><td>{{ s.err }}</td><td>{{ s.g }}</td></tr>{% endfor %}
+</table></div>
+<div class="grafico">{{ grafici.smile | safe }}</div>
+
+<h2>3. L'arbitraggio statico e la superficie SSVI</h2>
+<p>Una superficie di volatilità è utilizzabile solo se non permette arbitraggi. Due condizioni: la densità neutrale al
+rischio deve essere positiva a ogni scadenza (nessun <b>butterfly</b> a costo negativo, cioè la funzione g(k) di
+Durrleman non negativa) e la varianza totale non deve scendere al crescere della scadenza a parità di k (nessun
+<b>calendar</b> a costo negativo). Le SVI stimate una scadenza alla volta riproducono bene i dati, ma nessuno garantisce
+le due condizioni fuori dagli strike quotati, dove la superficie viene comunque usata per prezzare gli esotici.</p>
+{% if viol_cal or viol_bf %}<div class="esito">Sulle SVI per scadenza i controlli trovano
+{% if viol_cal %}arbitraggi calendar tra {% for c in viol_cal %}{{ c.T1 }} e {{ c.T2 }} (peggiore a strike/forward
+{{ c.k }}){{ ", " if not loop.last }}{% endfor %}{% endif %}{% if viol_cal and viol_bf %} e {% endif %}{% if viol_bf %}un
+arbitraggio butterfly a {{ viol_bf | join(", ") }}{% endif %}: le ali estrapolate si incrociano.</div>{% endif %}
+<p>La <b>SSVI</b> (Gatheral e Jacquier, 2014) descrive tutta la superficie con la curva della varianza ATM θ(T) e tre
+parametri: ρ = {{ ssvi.rho }}, η = {{ ssvi.eta }}, γ = {{ ssvi.gamma }}. Con η(1 + |ρ|) = {{ cond_ssvi }} ≤ 2 e γ ≤ 0,5 è
+libera da arbitraggio statico per costruzione, a ogni strike e scadenza. Il prezzo è un adattamento meno preciso: in
+media {{ err_medio.SSVI }} punti di volatilità contro {{ err_medio["SVI per scadenza"] }} delle SVI per scadenza.</p>
+<div class="grafico">{{ grafici.calendar | safe }}</div>
+<div class="grafico">{{ grafici.densita | safe }}</div>
+<div class="grafico">{{ grafici.superficie | safe }}</div>
+
+<h2>4. Il modello di Heston</h2>
+<p>Heston fa della varianza un processo casuale che torna verso una media, correlato con il prezzo. Cinque parametri
+per tutta la superficie, calibrati minimizzando gli errori di prezzo divisi per la vega (cioè gli errori in
+volatilità):</p>
+<table>
+  <tr><th>Parametro</th><th>Valore</th><th class="testo">Significato</th></tr>
+  <tr><td>κ</td><td>{{ heston.kappa }}</td><td class="testo">velocità con cui la varianza torna alla media</td></tr>
+  <tr><td>θ</td><td>{{ heston.theta }}</td><td class="testo">varianza di lungo periodo (volatilità {{ heston.vol_lungo }})</td></tr>
+  <tr><td>ξ</td><td>{{ heston.xi }}</td><td class="testo">volatilità della varianza: la curvatura dello smile</td></tr>
+  <tr><td>ρ</td><td>{{ heston.rho }}</td><td class="testo">correlazione tra prezzo e varianza: l'inclinazione dello smile</td></tr>
+  <tr><td>v₀</td><td>{{ heston.v0 }}</td><td class="testo">varianza di oggi (volatilità {{ heston.vol0 }})</td></tr>
+  <tr><td>Feller 2κθ/ξ²</td><td>{{ heston.feller }}</td><td class="testo">sotto 1 la varianza può toccare lo zero: succede quasi sempre sugli indici azionari</td></tr>
+</table>
+<table>
+  <tr><th>Scadenza</th><th>SVI per scadenza</th><th>SSVI</th><th>Heston</th><th>Mezzo spread</th><th>Dentro lo spread: SVI</th><th>SSVI</th><th>Heston</th></tr>
+  {% for r in errori %}<tr><td>{{ r.T }}</td><td>{{ r.svi }}</td><td>{{ r.ssvi }}</td><td>{{ r.heston }}</td><td>{{ r.spread }}</td><td>{{ r.d_svi }}</td><td>{{ r.d_ssvi }}</td><td>{{ r.d_heston }}</td></tr>{% endfor %}
+</table>
+<p class="sub">Errore medio assoluto in punti di volatilità e quota di opzioni il cui prezzo di modello cade dentro
+il bid-ask.</p>
+<div class="grafico">{{ grafici.errori | safe }}</div>
+<p>Heston fatica sulle scadenze brevi. Lo smile a un mese è molto ripido perché il mercato prezza il rischio di
+<b>salti</b> improvvisi, che un modello con volatilità continua non ha: per produrre quella pendenza servirebbe una
+volatilità della varianza enorme, che però guasterebbe le scadenze lunghe. La pendenza dello smile al forward
+scende con la scadenza circa come T^{{ esp_skew }}{% if ha_vero %}; Heston riproduce la legge nel tratto centrale
+(T^{{ esp_skew_h }}) ma non il primo mese{% endif %}.</p>
+<div class="grafico">{{ grafici.struttura | safe }}</div>
+
+<h2>5. La volatilità locale di Dupire</h2>
+<p>Il modello a volatilità locale assegna a ogni livello dell'indice e a ogni data una volatilità σ(S, t) ricavata
+dalla superficie implicita con la formula di Dupire. Riproduce per costruzione tutte le opzioni europee. Vicino al
+denaro la volatilità locale è circa due volte più inclinata di quella implicita: la volatilità implicita è una media
+delle volatilità locali lungo il percorso.</p>
+<div class="grafico">{{ grafici.locale | safe }}</div>
+
+{% if esotici %}
+<h2>6. Rischio di modello sugli esotici</h2>
+<p>Gli stessi dati, quattro modelli: Black-Scholes con la sola volatilità ATM a un anno, volatilità locale, Heston
+{% if ha_vero %}e il modello di Bates che ha generato il mercato sintetico (il «vero» prezzo, che nella realtà non si
+conosce){% endif %}. Monte Carlo con {{ percorsi }} percorsi e osservazione giornaliera; prezzi in percentuale del
+nozionale.</p>
+<div class="scroll"><table>
+  <tr><th>Prodotto</th>{% for c in esotici_cols %}<th>{{ c }}</th>{% endfor %}</tr>
+  {% for r in esotici %}<tr><td>{{ r.nome }}</td>{% for v in r.valori %}<td>{{ v }}</td>{% endfor %}</tr>{% endfor %}
+</table></div>
+<div class="grafico">{{ grafici.esotici | safe }}</div>
+<table>
+  <tr><th>Prodotto</th><th class="testo">Che cosa è</th></tr>
+  {% for r in esotici %}<tr><td>{{ r.nome }}</td><td class="testo">{{ r.descrizione }}</td></tr>{% endfor %}
+</table>
+<div class="esito">Black-Scholes con una sola volatilità sbaglia anche la put europea, perché ignora lo smile, e
+sottovaluta di molto la put con barriera: è l'opzione che chi compra un certificato a capitale condizionatamente
+protetto vende all'emittente. Volatilità locale e Heston prezzano allo stesso modo le europee ma non gli esotici:
+la differenza è il rischio di modello, che un emittente copre con riserve e che un consulente dovrebbe conoscere.</div>
+{% endif %}
+
+<h2>Metodologia</h2>
+<ul>
+  <li><b>Black sul forward</b>: prezzi, greche e volatilità implicita con il metodo di Brent.</li>
+  <li><b>Heston e Bates</b>: funzione caratteristica nella forma di Albrecher et al. (2007), prezzi con la formula di
+  Lewis (2001) e quadratura di Gauss-Legendre; Monte Carlo con Eulero «full truncation» e variabili antitetiche.</li>
+  <li><b>SVI</b>: minimi quadrati con più punti di partenza e il vincolo di varianza minima non negativa;
+  <b>SSVI</b> con φ a legge di potenza e il vincolo sufficiente di Gatheral e Jacquier.</li>
+  <li><b>Controlli</b>: g(k) di Durrleman e differenza di varianza totale tra scadenze consecutive su una griglia di
+  k da −1,5 a 1.</li>
+  <li><b>Volatilità locale</b>: σ²(k, T) = (∂w/∂T) / g(k) sulla superficie SSVI, derivata in T alle differenze finite;
+  Monte Carlo sul logaritmo del prezzo.</li>
+</ul>
+{% if ha_vero %}<p class="note">Mercato sintetico generato da un modello di Bates con κ = {{ vero.kappa }}, θ = {{ vero.theta }},
+ξ = {{ vero.xi }}, ρ = {{ vero.rho }}, v₀ = {{ vero.v0 }} e salti con intensità {{ vero.lam }} l'anno, media {{ vero.mu }} e
+deviazione {{ vero.dev }}; bid e ask con spread realistici e quattordici errori di dati inseriti di proposito.{% endif %}
+Il report ha scopo dimostrativo e non costituisce consulenza finanziaria né raccomandazione di investimento.</p>
+</body>
+</html>

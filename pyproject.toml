@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vol-surface-lab"
+version = "0.1.0"
+description = "Superficie di volatilità implicita: pulizia dei dati, SVI e SSVI senza arbitraggio, Heston, volatilità locale di Dupire e rischio di modello sugli esotici"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Francesco Torraco" }]
+keywords = ["volatilità implicita", "SVI", "SSVI", "Heston", "Dupire", "volatilità locale", "opzioni", "derivati"]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "pandas>=2.2",
+    "plotly>=5.20",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+png = ["kaleido>=1.0"]
+dev = ["pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+vol-surface-lab = "vol_surface_lab.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vol_surface_lab = ["templates/*.j2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::pytest.PytestCollectionWarning"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B905", "B023"]
